@@ -1,0 +1,478 @@
+<?php
+
+/* requiring files which contain dbfunctions and helper functions */
+require_once('testmap.dbfunctions.inc');
+require_once('testmap.helperfunctions.inc');
+ctools_include('ajax');
+ctools_include('modal');
+
+/* tips
+* print_r formatted version of the array and var_dump but with more detail
+*/
+/* hook_menu for testmap begins 
+************************************************************************************************
+*/
+/**
+ * hook_menu for map
+ */	
+function testmap_menu(){
+	
+    $items = array();
+    $items['testmap'] = array(
+        'title' => 'Map',
+        'description' => 'Displays map, enables addition, deletion and updation of locations',
+        'page callback' => 'mapShow', 
+		'access callback' => TRUE,
+		);
+	$items['testmap/map']=array(
+	    'title' => 'Map Display',
+		'type' => MENU_DEFAULT_LOCAL_TASK,
+		'weight' => -10,
+    );	
+	 $items['testmap/list'] = array (
+	   'title' => 'Locations List, Add, Delete & Edit',
+	   'type' => MENU_LOCAL_TASK,
+	   'weight' => -9,
+	   'page callback' => 'create_map_table',
+	   'access callback' => TRUE,	
+	); 
+     
+	 $items['testmap/upload/nojs'] = array (
+        'title' => 'Upload File',
+        'type' => MENU_CALLBACK,
+        'page callback' => 'upload_file',
+		'page arguments' => array(2),
+	    'access callback' => TRUE,
+		'delivery callback' => 'ajax_deliver',
+	);
+	 
+	 $items['testmap/upload/ajax'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/upload/nojs']; 
+
+	 $items['testmap/add/nojs'] = array (
+	   'type' => MENU_CALLBACK,
+	   'tite' => 'Locations',
+	   'page callback' => 'add_locations',
+	   'page arguments' => array(2),
+	   'access callback' => TRUE,
+	   'delivery callback' => 'ajax_deliver',
+	 );
+	   $items['testmap/add/ajax'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/add/nojs']; 
+
+
+	$items['testmap/add_mult/nojs'] = array (
+	   'type' => MENU_CALLBACK,
+	   'title' => 'Locations',
+	   'page callback' => 'add_mult_locations',
+	   'page arguments' => array(2),
+	   'access callback' => TRUE,
+	   'delivery callback' => 'ajax_deliver',
+	 );
+	   $items['testmap/add_mult/ajax'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/add_mult/nojs']; 
+
+		
+	 $items['testmap/delete/nojs/%'] = array (
+	   'page callback' => 'delete_location',
+	   'page arguments' => array(2,3),
+	   'access arguments' => array('access location id'),
+	   'access callback' => TRUE,
+	   'type' => MENU_CALLBACK,
+	   'delivery callback' => 'ajax_deliver',
+     );
+	   $items['testmap/delete/ajax/%'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/delete/nojs/%']; 
+		
+	$items['testmap/delete_all/nojs'] = array (
+	   'page callback' => 'delete_all_locations',
+	   'page arguments' => array(2,3),
+	   'access arguments' => array('access location id'),
+	   'access callback' => TRUE,
+	   'type' => MENU_CALLBACK,
+	   'delivery callback' => 'ajax_deliver',
+     );
+	   $items['testmap/delete_all/ajax'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/delete_all/nojs']; 
+   
+	 $items['testmap/update/nojs/%'] = array (
+	   'type' => MENU_CALLBACK,
+	   'page callback' => 'update_location',
+	   'page arguments' => array(2,3),
+	   'access callback' => TRUE,
+	   'access arguments' => array('access location id'),
+	   'delivery callback' => 'ajax_deliver',
+	 );
+	 $items['testmap/update/ajax/%'] = array (
+       'delivery callback' => 'ajax_deliver',
+	    ) + $items['testmap/update/nojs/%'];  
+	return $items;
+}
+
+/* testmap hook_menu ends 
+************************************************************************************************
+*/
+
+/* Upload file functions begins 
+************************************************************************************************
+*/
+/*
+* upload_file()
+* parameters: form and form_state
+* Creates a form for uploading files, validates file extension,
+* checks if file is uploaded, if uploaded does the user want to 
+* remove it. This is done client-side with js
+*/
+function upload_file($js = NULL){
+   if (!$js) {
+    return drupal_get_form('upload_file_form');
+  }
+    $output = return_modal_form('upload_file');
+    print ajax_render($output);
+    exit();
+   
+}
+
+function upload_file_form($form, $form_state){
+  return create_upload_file($form, $form_state);
+ 
+}
+/*
+* upload_file_validate()
+* parameters: form and form_state
+* uploads the file to the specified directory
+* and saves the file values like name, extension etc 
+* in the form_state
+*/
+function upload_file_validate($form, &$form_state){
+   try {
+         $file = file_save_upload('file', array(
+	            'file_validate_extensions' => array('csv'),
+				FILE_EXISTS_REPLACE));
+	   	
+	      if ($file) {
+		    if($file = file_move($file, 'public://'.$file->filename.'')){
+			    $form_state['upload']['values']['file'] = $file;
+			     }
+			}
+		}
+	catch(Exception $e){
+		  drupal_set_message(t('Failed to write the file or file was not uploaded. Message = %message, query=%query', 
+	       array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+		   
+		   }
+}
+/*
+* upload_file_submit()
+* parameters: form and form_state
+* reads the data from the file and adds the details to
+* the osmap database. If the insert succeeds, the form_state
+* is cleared and the information is put in the map.
+*/
+  function upload_file_submit($form, &$form_state){
+    $success = 0;
+	$data = array();
+	$firstLine = true;
+	$mapValue =array();
+	try 
+	{
+		$file = $form_state['upload']['values']['file'];
+		$txt_file = file_get_contents('public://'.$file->filename.'');
+ 	
+	    $success  = parse_data($txt_file);
+		if ($success){
+		    //remove the file from the form_state
+			unset($form_state['upload']['values']['file']);
+			file_delete($file);
+		  }
+		}
+	catch (Exception $e){
+	  drupal_set_message(t('Failed to add data to the table. Message = %message, query=%query', 
+	       array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+	 }   
+   
+  }
+/* Upload file functions ends 
+************************************************************************************************
+*/
+/* Add multiple locations begins
+************************************************************************************************
+*/
+function add_mult_locations($js = NULL) {
+   
+   if (!$js) {
+    return drupal_get_form('add_mult_locations_form');
+  }
+    $output = return_modal_form('add_mult');
+    print ajax_render($output);
+    exit();
+  }
+  
+ function add_mult_locations_form($form, $form_state) {   
+  return create_form($form,$form_state,'add_mult');
+}
+
+function add_mult_locations_form_submit($form, &$form_state){
+   $location_data = $form_state['values']['data'];
+   
+   try {
+       $success = parse_data($location_data);
+        }
+   catch(Exception $e){
+		  drupal_set_message(t('Failed to write the file or file was not uploaded. Message = %message, query=%query', 
+	       array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+		   
+		   }
+     
+}
+/* Add function begins 
+************************************************************************************************
+*/
+/*
+* add_locations()
+* parameters: js parameter.  
+* checks if the form is an ajax form requested. If yes it ajax_renders it
+* else it renders a non-ajax form
+* Returns: a modal form of add type
+*/
+function add_locations($js = NULL) {
+   if (!$js) {
+    return drupal_get_form('add_locations_form');
+  }
+    $output = return_modal_form('add');
+    print ajax_render($output);
+    exit();
+  }
+  
+/*
+* add_locations_form()
+* parameters: form  and form_state  
+* get details for the location, like the latitude, longitude etc
+* inserts the values for the location in the database
+* Returns: success/error message depending on the outcome
+*/
+function add_locations_form($form, $form_state) {   
+//  $form = array();
+  return create_form($form,$form_state,'add');
+}
+/**
+ * adds new location details to the table = 'osmap'
+ */
+function add_locations_form_submit($form, &$form_state){
+    $lat_lng = get_latitude_longitude($form_state['values']['address']);
+	$mapValues =  return_map_values($form_state['values']['address'],
+	                                $lat_lng['lat'], $lat_lng['lng']
+									);
+	try {
+	           
+				$returnValue = map_insert_data($mapValues);
+				//create_map_table($form,$form_state);
+			    drupal_set_message(t('Successfully added new location: '.$mapValues['name']));
+	     }
+		 catch (Exception $e){
+                drupal_set_message(t('Insert of location: "'.$mapValues['name'].'" failed. Message = %message, query=%query', 
+	            array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+
+          }  
+ }
+
+/* Add function ends 
+************************************************************************************************
+*/
+/* Delete function begins
+************************************************************************************************
+*/
+/*
+* delete_location()
+* parameters: js parameter and location id.  
+* checks if the form is an ajax form requested. If yes it ajax_renders it
+* else it renders a non-ajax form. It also finds the location name for the 
+* location id to confirm the deletion
+* Returns: a modal form of delete type
+*/
+function delete_location($js = NULL, $location_id){
+   if(!$js) {
+   $form = array();
+   return drupal_get_form('delete_location_form');
+   } 
+   $locationDetails = map_select_data_id($location_id);
+   $output = return_modal_form('delete', $locationDetails['address'], $location_id);
+   print ajax_render($output);
+   exit(); 
+  }
+  
+ /**
+ * delete_location_form()
+ * arguments: form and form_state
+ * Returns: modal delete form
+ */
+  function delete_location_form($form, $form_state){
+    return create_delete_form($form, $form_state, 'delete');
+  }
+ 
+ /**
+ * delete_location_form_submit
+ * arguments: form and form_state
+ * Returns: modal delete form
+ */
+ function delete_location_form_submit($form, $form_state){
+     $deletingId = ($form_state['id']);
+	 $cleanDeletingId = array('@id' => $deletingId);
+	 $success = map_delete_data($cleanDeletingId);
+ }
+  
+/* Delete function ends
+************************************************************************************************
+*/
+/* Delete All function begins
+************************************************************************************************
+*/
+function delete_all_locations($js = NULL, $location_id){
+   if(!$js) {
+   $form = array();
+   return drupal_get_form('delete_all_locations_form');
+   } 
+//   $locationDetails = map_select_data_id($location_id);
+   $output = return_modal_form('delete_all');
+   print ajax_render($output);
+   exit(); 
+  }
+  
+ /**
+ * creating the modal delete form
+ */
+  function delete_all_locations_form($form, $form_state){
+    return create_delete_form($form, $form_state,'delete_all');
+  }
+ 
+ /**
+ * submitting the delete location form
+ */
+ function delete_all_locations_form_submit($form, $form_state){
+   
+     $success = map_delete_all_data();
+ }
+  
+/* Delete All function ends
+************************************************************************************************
+/* Update function begins
+************************************************************************************************
+*/
+/**
+ * creating the modal update form
+ */
+function update_location($js = NULL, $location_id){
+  if(!$js) {
+   $form = array();
+   return drupal_get_form('update_location_form');
+   }
+     
+   $form_state = array(
+    'ajax' => TRUE,
+	'title' => 'Update location',
+	'id' => $location_id
+   );
+   $output = ctools_modal_form_wrapper('update_location_form', $form_state);
+   if(!empty($form_state['ajax_commands'])){
+     $output = $form_state['ajax_commands'];
+   }
+   if(!empty($form_state['executed'])){
+    ctools_add_js('ajax-responder');
+	$output[] = ctools_modal_command_dismiss();
+	$output[] = ctools_ajax_command_reload();   
+   }
+   print ajax_render($output);
+   exit();
+}
+
+/**
+ * creating the update form
+ */
+function update_location_form($form, $form_state) {   
+  $form = array();
+  return create_update_form($form, $form_state,'update');
+}
+
+/**
+ * submitting the update form
+ */
+function update_location_form_submit($form, &$form_state){
+    $updatingId=($form_state['id']);
+	$lat_lng = get_latitude_longitude($form_state['values']['address']);
+    $mapValues =  return_map_values($form_state['values']['address'],
+	                                $lat_lng['lat'], $lat_lng['lng']
+									);
+   try {
+      $count = map_update_data($mapValues, $updatingId);
+     // drupal_set_message(t("Updated location @mapValue (@count row updated)", 
+	//                     array('@count' => $count, '@mapValue' =>print_r($mapValues['name'], TRUE))));
+	  }
+   catch (Exception $e)
+    {
+       drupal_set_message(t('Failed to update location. Message = %message, query=%query', 
+	            array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+      }     
+}
+ /* Update function ends
+************************************************************************************************
+*/
+/* mapShow function begins
+************************************************************************************************
+*/
+ /**
+ * display the map with all the locations present in the table
+ * #markup -> displays a google map in the div
+ * #js -> attaches two js files, one external and one internal
+ * $mapValues are sent via settings feature in drupal 7
+ */
+function mapShow(){
+    $type = array();
+	$name = array();
+	$data_output = '';
+	$name_output ='';
+	$mapValues = map_select_data(); 
+		
+	
+	//   <div id="sidebar" style="width: 15%; height:500px; float:right; vertical-align:bottom; overflow: auto"></div>
+	
+ try { 
+ 	$build = array(
+	  '#markup' => '           
+	                <div id="googleMap" style="width: 85%; height: 500px;float:middle; vertical-align:top"></div> 
+	           
+				    
+				   ',
+	  '#attached' => array (
+	     'js' => array (
+		    'https://maps.googleapis.com/maps/api/js?v=3.exp&sensor=false' => array('type' => 'external',),
+	        drupal_get_path('module', 'testmap') . '/testmap.js' ,
+		    drupal_get_path('module' ,'testmap') . '/markerclusterer.js',
+			array(
+				'type' => 'setting',
+				'data' => array(
+					'testmap' => $mapValues
+					)
+				)
+			)		
+		),
+     );  
+   } 
+  catch (Exception $e)
+    {
+       drupal_set_message(t('Error in displaying map. Message = %message, query=%query', 
+	            array('%message' =>$e->getMessage(),'%query' => $e->query_string)), 'error');
+    }	
+	return $build;	  
+} 
+
+
+/* mapShow function ends
+************************************************************************************************
+*/
+
+
