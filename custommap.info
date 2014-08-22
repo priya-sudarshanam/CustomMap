@@ -1,0 +1,5 @@
+name = custommap
+description = Displays map, adds, updates and deletes a location
+core = 7.x
+files[] = custommap.js, custommap.module, custommap.dbfunctions.inc
+dependencies[] = ctools
